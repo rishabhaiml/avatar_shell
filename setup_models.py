@@ -52,6 +52,20 @@ def extract_tar_bz2(filepath, extract_to):
         print(f"❌ Error during extraction: {e}")
         raise e
 
+def is_item_valid(path):
+    if not os.path.exists(path):
+        return False
+    if os.path.isdir(path):
+        try:
+            return len(os.listdir(path)) > 0
+        except Exception:
+            return False
+    else:
+        try:
+            return os.path.getsize(path) > 0
+        except Exception:
+            return False
+
 def main():
     print("=" * 60)
     print("🌟 B.H.A.I. Model & Weights Setup Tool 🌟")
@@ -77,21 +91,32 @@ def main():
     # Check what needs to be downloaded
     try:
         # 1. Download model.gguf
-        if not os.path.exists(gguf_dest):
+        if not is_item_valid(gguf_dest):
             download_file(GGUF_URL, gguf_dest)
         else:
             print("❇️ GGUF model already exists. Skipping.")
             
         # 2. Download model.vrm
-        if not os.path.exists(vrm_dest):
+        if not is_item_valid(vrm_dest):
             download_file(VRM_URL, vrm_dest)
         else:
             print("❇️ VRM model already exists. Skipping.")
             
         # 3. Download & Extract Kokoro weights
         kokoro_final_dir = os.path.join(weights_dir, "kokoro-v1.0")
-        if not os.path.exists(kokoro_final_dir) or not os.path.exists(os.path.join(kokoro_final_dir, "model.onnx")):
-            if not os.path.exists(kokoro_tar_dest):
+        required_items = [
+            os.path.join(kokoro_final_dir, "model.onnx"),
+            os.path.join(kokoro_final_dir, "voices.bin"),
+            os.path.join(kokoro_final_dir, "tokens.txt"),
+            os.path.join(kokoro_final_dir, "lexicon-us-en.txt"),
+            os.path.join(kokoro_final_dir, "espeak-ng-data"),
+            os.path.join(kokoro_final_dir, "dict")
+        ]
+        
+        kokoro_missing = any(not is_item_valid(item) for item in required_items)
+        if kokoro_missing:
+            print("⚠️ Some Kokoro assets are missing or corrupted. Preparing to download/restore...")
+            if not is_item_valid(kokoro_tar_dest):
                 download_file(KOKORO_URL, kokoro_tar_dest)
             extract_tar_bz2(kokoro_tar_dest, weights_dir)
             if os.path.exists(kokoro_tar_dest):
