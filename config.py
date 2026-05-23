@@ -3,6 +3,13 @@ import queue
 import threading
 from enum import Enum
 import numpy as np
+import sys
+import os
+
+# --- PLATFORM & BROWSER FALLBACK LAYER ---
+BROWSER_MODE = False
+if sys.platform.startswith("win") or os.environ.get("FORCE_BROWSER_MODE") == "1":
+    BROWSER_MODE = True
 
 # --- HARDWARE & AUDIO CONSTANTS ---
 RATE = 16000

@@ -1,47 +1,101 @@
 import time
 import queue
-import pyaudio
 import numpy as np
-from gi.repository import GLib
 import config
 from audio.vad import calculate_frame_rms
 
-def audio_hardware_capture_loop(pyaudio_instance: pyaudio.PyAudio):
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
+
+try:
+    import sounddevice as sd
+except ImportError:
+    sd = None
+
+def audio_hardware_capture_loop(pyaudio_instance):
     """
     Main thread running the physical soundcard input stream pipeline.
     """
-    stream = pyaudio_instance.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=config.RATE,
-        input=True,
-        frames_per_buffer=config.CHUNK
-    )
-    
-    print("mic: Opening thread-safe background capture channels...")
-    
-    while True:
-        try:
-            raw_bytes = stream.read(config.CHUNK, exception_on_overflow=False)
-            config.AUDIO_FRAME_QUEUE.put(raw_bytes)
-        except Exception as e:
-            print(f"⚠️ Soundcard hardware record drop: {e}")
-            time.sleep(0.01)
+    if pyaudio_instance is None:
+        # Fallback to sounddevice for Windows/compile-free environments
+        if sd is None:
+            print("⚠️ No PyAudio or Sounddevice available. Microphone capture is disabled.")
+            return
 
-def playback_worker_thread(pyaudio_instance: pyaudio.PyAudio, flush_callback=None):
+        def callback(indata, frames, time_info, status):
+            config.AUDIO_FRAME_QUEUE.put(indata.copy().tobytes())
+
+        print("mic: Opening thread-safe background capture channels via sounddevice...")
+        try:
+            with sd.InputStream(samplerate=config.RATE, channels=1, dtype='int16', blocksize=config.CHUNK, callback=callback):
+                while True:
+                    time.sleep(0.1)
+        except Exception as e:
+            print(f"⚠️ Soundcard hardware record drop (sounddevice): {e}")
+            time.sleep(0.5)
+            # Retry loop in case soundcard was busy
+            while True:
+                try:
+                    with sd.InputStream(samplerate=config.RATE, channels=1, dtype='int16', blocksize=config.CHUNK, callback=callback):
+                        while True:
+                            time.sleep(0.1)
+                except Exception:
+                    time.sleep(1.0)
+    else:
+        # Standard PyAudio capture
+        stream = pyaudio_instance.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=config.RATE,
+            input=True,
+            frames_per_buffer=config.CHUNK
+        )
+        
+        print("mic: Opening thread-safe background capture channels...")
+        
+        while True:
+            try:
+                raw_bytes = stream.read(config.CHUNK, exception_on_overflow=False)
+                config.AUDIO_FRAME_QUEUE.put(raw_bytes)
+            except Exception as e:
+                print(f"⚠️ Soundcard hardware record drop: {e}")
+                time.sleep(0.01)
+
+def playback_worker_thread(pyaudio_instance, flush_callback=None):
     """
     Main thread running the hardware speech output playback stream and real-time lip sync visemes.
     """
-    # Open speaker stream natively at 24000Hz (matching Kokoro output rate)
-    speaker_stream = pyaudio_instance.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=24000,
-        output=True,
-        frames_per_buffer=512
-    )
+    speaker_stream = None
+    if pyaudio_instance is None:
+        # Fallback to sounddevice for Windows/compile-free environments
+        if sd is None:
+            print("⚠️ No PyAudio or Sounddevice available. Playout is disabled.")
+            return
+            
+        print("speaker: Opening thread-safe background playback channels via sounddevice...")
+        try:
+            speaker_stream = sd.OutputStream(
+                samplerate=24000,
+                channels=1,
+                dtype='int16',
+                blocksize=512
+            )
+            speaker_stream.start()
+        except Exception as e:
+            print(f"❌ Failed to open sounddevice output stream: {e}")
+    else:
+        # Open speaker stream natively at 24000Hz (matching Kokoro output rate)
+        speaker_stream = pyaudio_instance.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=24000,
+            output=True,
+            frames_per_buffer=512
+        )
     
-    print("speaker: Opening thread-safe background playback channels...")
+    print("speaker: Background playback channel successfully initialized.")
     
     while True:
         try:
@@ -96,7 +150,11 @@ def playback_worker_thread(pyaudio_instance: pyaudio.PyAudio, flush_callback=Non
                 if config.SEND_UI_STATE_CALLBACK:
                     config.SEND_UI_STATE_CALLBACK(current_aa, current_ee, current_ih, current_oh, current_ou, listening=False)
                     
-                speaker_stream.write(data)
+                if pyaudio_instance is None:
+                    if speaker_stream:
+                        speaker_stream.write(audio_array)
+                else:
+                    speaker_stream.write(data)
                 current_frame += chunk_size
             
             # Send silent mouth viseme state at end of sentence
@@ -113,7 +171,12 @@ def playback_worker_thread(pyaudio_instance: pyaudio.PyAudio, flush_callback=Non
             
     # Cleanup speaker stream explicitly
     try:
-        speaker_stream.stop_stream()
-        speaker_stream.close()
+        if pyaudio_instance is None:
+            if speaker_stream:
+                speaker_stream.stop()
+                speaker_stream.close()
+        else:
+            speaker_stream.stop_stream()
+            speaker_stream.close()
     except Exception:
         pass

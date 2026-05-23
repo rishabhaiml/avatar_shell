@@ -8,18 +8,22 @@ import config
 def kokoro_synthesizer_worker():
     print("🧠 Initializing Native C++ Sherpa-ONNX Kokoro Engine...")
     
-    # Establish path coordinates matching standard downloaded layout structures
-    model_dir = "weights/kokoro-v1.0"
+    # Establish absolute, forward-slash-safe path coordinates matching standard downloaded layout structures
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    model_dir = os.path.join(base_dir, "weights", "kokoro-v1.0")
     
+    def to_safe_path(p):
+        return os.path.abspath(p).replace("\\", "/")
+        
     cfg = sherpa_onnx.OfflineTtsConfig(
         model=sherpa_onnx.OfflineTtsModelConfig(
             kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
-                model=os.path.join(model_dir, "model.onnx"),
-                voices=os.path.join(model_dir, "voices.bin"),
-                tokens=os.path.join(model_dir, "tokens.txt"),
-                data_dir=os.path.join(model_dir, "espeak-ng-data"),
-                lexicon=os.path.join(model_dir, "lexicon-us-en.txt"),
-                dict_dir=os.path.join(model_dir, "dict")
+                model=to_safe_path(os.path.join(model_dir, "model.onnx")),
+                voices=to_safe_path(os.path.join(model_dir, "voices.bin")),
+                tokens=to_safe_path(os.path.join(model_dir, "tokens.txt")),
+                data_dir=to_safe_path(os.path.join(model_dir, "espeak-ng-data")),
+                lexicon=to_safe_path(os.path.join(model_dir, "lexicon-us-en.txt")),
+                dict_dir=to_safe_path(os.path.join(model_dir, "dict"))
             ),
             num_threads=2
         )

@@ -18,7 +18,11 @@ def run_adaptive_snr_vad(audio_chunk: bytes, command_vad_engine) -> bool:
     dynamic_speech_gate = min(3500.0, max(800.0, config.ambient_noise_rms * 2.0))
     
     # Combine frequency checking with structural amplitude thresholds
-    is_valid_speech = command_vad_engine.is_speech(audio_chunk, config.RATE) and (sub_volume > dynamic_speech_gate)
+    if command_vad_engine is not None:
+        is_valid_speech = command_vad_engine.is_speech(audio_chunk, config.RATE) and (sub_volume > dynamic_speech_gate)
+    else:
+        # Fallback to pure-Python dynamic SNR thresholding when webrtcvad C-extension is absent
+        is_valid_speech = (sub_volume > dynamic_speech_gate)
     
     # Log VAD calculations periodically (e.g. if speech is active or on periodic checks)
     # The parent loop will print state as necessary. We can log here too.

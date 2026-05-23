@@ -12,12 +12,27 @@ import collections
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import numpy as np
 import websockets
-import pyaudio
-import webrtcvad
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
+
+try:
+    import webrtcvad
+except ImportError:
+    webrtcvad = None
+
 import openwakeword
 from openwakeword.model import Model
 from faster_whisper import WhisperModel
-import gi
+
+import config
+
+# --- PLATFORM & BROWSER MODE CHECKS ---
+HAS_GUI = False
+Gtk = None
+WebKit = None
+GLib = None
 
 # --- SUPPRESS ALSA & ONNX CONSOLE SPAM ---
 stderr_fd = sys.stderr.fileno()
@@ -26,9 +41,13 @@ devnull = os.open(os.devnull, os.O_WRONLY)
 os.dup2(devnull, stderr_fd)
 
 try:
+    import gi
     gi.require_version('Gtk', '4.0')
     gi.require_version('WebKit', '6.0')
     from gi.repository import Gtk, GLib
+    HAS_GUI = True
+except (ImportError, ValueError):
+    config.BROWSER_MODE = True
 finally:
     # Restore stderr immediately
     os.dup2(save_stderr, stderr_fd)
@@ -38,13 +57,20 @@ finally:
 warnings.filterwarnings("ignore", category=UserWarning, module="onnxruntime")
 
 # Preload GTK LayerShell for safety
-try:
-    ctypes.CDLL('libgtk4-layer-shell.so', mode=ctypes.RTLD_GLOBAL)
-except OSError:
-    pass
+if HAS_GUI:
+    try:
+        ctypes.CDLL('libgtk4-layer-shell.so', mode=ctypes.RTLD_GLOBAL)
+    except OSError:
+        pass
 
-import config
-from ui.window import AvatarApp
+# Conditionally import GTK window class
+AvatarApp = None
+if not config.BROWSER_MODE and HAS_GUI:
+    try:
+        from ui.window import AvatarApp
+    except ImportError:
+        config.BROWSER_MODE = True
+
 from audio.vad import calculate_frame_rms, run_adaptive_snr_vad
 from audio.pipeline import audio_hardware_capture_loop, playback_worker_thread
 from brain.llm import llm_worker_thread
@@ -52,7 +78,7 @@ from brain.tts import kokoro_synthesizer_worker
 from brain.normalizer import LinguisticNormalizer
 
 # Global Engines and Streams
-COMMAND_VAD = webrtcvad.Vad(3)
+COMMAND_VAD = webrtcvad.Vad(3) if webrtcvad else None
 STT_MODEL = None
 WAKE_MODEL = None
 MIC_STREAM = None
@@ -624,8 +650,8 @@ def main():
     threading.Thread(target=llm_worker_thread, args=(os.path.join(base_dir, "model.gguf"),), daemon=True).start()
     threading.Thread(target=kokoro_synthesizer_worker, daemon=True).start()
     
-    # Initialize physical Sound Card PortAudio drivers
-    pa = pyaudio.PyAudio()
+    # Initialize physical Sound Card PortAudio drivers conditionally
+    pa = pyaudio.PyAudio() if pyaudio else None
     
     # Open mic record streaming pipeline
     threading.Thread(target=audio_hardware_capture_loop, args=(pa,), daemon=True).start()
@@ -635,21 +661,43 @@ def main():
 
     print("\n🎤 B.H.A.I. Core Active. Say 'Hey Jarvis'...")
 
-    # Hook the state machine timer loop into the primary GTK thread context
-    GLib.timeout_add(30, process_audio_queue)
-
-    # Launch primary GTK Application loop
-    try:
-        app = AvatarApp()
-        sys.exit(app.run(sys.argv))
-    except KeyboardInterrupt:
-        print("\n⚙️ Shutting down Shell cleanly down via termination sequences.")
-    finally:
+    if config.BROWSER_MODE:
+        import webbrowser
+        # Open in default system browser
+        webbrowser.open(f"http://127.0.0.1:8000/index.html?v={int(time.time())}")
+        print("\n🖥️ B.H.A.I. running in Browser Mode. View your avatar at: http://127.0.0.1:8000")
+        
+        # Run state machine timer loop on the main thread
         try:
-            pa.terminate()
-        except Exception:
-            pass
-        sys.exit(0)
+            while True:
+                process_audio_queue()
+                time.sleep(0.030)
+        except KeyboardInterrupt:
+            print("\n⚙️ Shutting down Shell cleanly via termination sequences.")
+        finally:
+            if pa:
+                try:
+                    pa.terminate()
+                except Exception:
+                    pass
+            sys.exit(0)
+    else:
+        # Hook the state machine timer loop into the primary GTK thread context
+        GLib.timeout_add(30, process_audio_queue)
+
+        # Launch primary GTK Application loop
+        try:
+            app = AvatarApp()
+            sys.exit(app.run(sys.argv))
+        except KeyboardInterrupt:
+            print("\n⚙️ Shutting down Shell cleanly via termination sequences.")
+        finally:
+            if pa:
+                try:
+                    pa.terminate()
+                except Exception:
+                    pass
+            sys.exit(0)
 
 if __name__ == "__main__":
     main()

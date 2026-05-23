@@ -27,40 +27,48 @@ Make sure you have [uv](https://github.com/astral-sh/uv) installed, then execute
 git clone https://github.com/rishabhaiml/avatar_shell.git
 cd avatar_shell
 
-# Sync all virtualenv dependencies automatically
+# Sync all virtualenv dependencies automatically (Linux & Windows Out-Of-The-Box!)
 uv sync
 ```
 
-### 2. Download Large Assets & Models
+> [!NOTE]
+> **Windows Compatibility**: The project is fully compatible with Windows! C-extension dependencies like `webrtcvad`, `pyaudio`, and `pygobject` are ignored on Windows via PEP 508 markers. B.H.A.I. will automatically fallback to "Web Browser Mode," opening your default system web browser to render the 3D visualizer. No complex compilers or setup are required!
 
-To keep the repository lightweight, large model weights and avatar assets are excluded from Git. Download them and place them in their respective paths:
+### 2. Download & Configure Large Assets & Models (Super Easy!)
 
-#### A. Avatar VRM & Brain GGUF Models
-We have hosted pre-aligned models on our release page:
-👉 **[Download Models from Release Page](https://github.com/rishabhaiml/avatar_shell/releases/tag/model)**
+To keep the repository lightweight, large model weights and avatar assets are excluded from Git. We provide a **completely automated, cross-platform setup script** that downloads and extracts all GGUF models, VRM avatars, and offline Kokoro speech weights in one click.
 
-1. Download **`model.vrm`** and place it in the `www/` folder:
-   * **Target Path:** `www/model.vrm` (Double cache-busters are active to refresh changes instantly!)
-2. Download the GGUF LLM model (e.g. **`model.gguf`**) and place it in the project root directory:
-   * **Target Path:** `./model.gguf`
-
-#### B. Off-line Kokoro TTS Weights
-B.H.A.I. utilizes Kokoro v1.0 running natively under `sherpa-onnx` for high-fidelity speech synthesis. 
-
-Run the following commands to create the target directory, download, and unpack the compiled weights:
+Simply execute:
 
 ```bash
-# Create weights directory
-mkdir -p weights
-
-# Download the C++ ready offline Kokoro bundle
-wget https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-v1.0.tar.bz2
-
-# Extract and clean up the archive
-tar xf kokoro-v1.0.tar.bz2 -C weights/
-rm kokoro-v1.0.tar.bz2
+uv run setup_models.py
 ```
-* **Verify Path:** Ensure you have `./weights/kokoro-v1.0/model.onnx` and `./weights/kokoro-v1.0/voices.bin` in place.
+
+*This script works flawlessly on both **Windows** and **Linux** without requiring external utilities like `wget`, `curl`, `tar`, or `unzip` since it uses Python's standard library.*
+
+---
+
+#### 🛠️ Manual Alternative (If you prefer downloading via your browser)
+
+If you prefer to download files manually, place them in the correct directories:
+
+1. **Avatar VRM & LLM Brain Model**:
+   * Go to the **[GitHub Release Page](https://github.com/rishabhaiml/avatar_shell/releases/tag/model)**.
+   * Download **`model.vrm`** and place it in the `www/` folder:
+     * **Target Path:** `www/model.vrm`
+   * Download **`model.gguf`** and place it in the project root directory:
+     * **Target Path:** `./model.gguf`
+
+2. **Offline Kokoro TTS Weights**:
+   * Download the C++ ready offline Kokoro bundle: **[Download kokoro-v1.0.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-v1.0.tar.bz2)**
+   * Extract the bundle inside the `weights/` folder.
+   * **Target Directory Structure:**
+     * `weights/kokoro-v1.0/model.onnx`
+     * `weights/kokoro-v1.0/voices.bin`
+     * `weights/kokoro-v1.0/tokens.txt`
+     * `weights/kokoro-v1.0/espeak-ng-data/`
+     * `weights/kokoro-v1.0/dict/`
+     * `weights/kokoro-v1.0/lexicon-us-en.txt`
 
 ---
 
