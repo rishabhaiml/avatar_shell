@@ -1,0 +1,15 @@
+# Exclude large third-party library files and pre-compiled visual assets
+www/js/
+www/utils/
+
+# Exclude large TTS weight models, dictionaries, and lexicons
+weights/
+
+# Exclude existing outputs and reports
+graphify-out/
+
+# Exclude standard Python virtual environments and logs
+.venv/
+__pycache__/
+.git/
+.agent/

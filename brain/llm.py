@@ -68,12 +68,17 @@ class TokenTextFilter:
         for char in token:
             if self.potential_action:
                 self.action_buffer += char
-                prefix = "[ACTION]"
+                prefix_action = "[ACTION]"
+                prefix_clarify = "[CLARIFY]"
                 
-                # Check if the action_buffer still matches the prefix of [ACTION]
-                if prefix.startswith(self.action_buffer):
-                    if self.action_buffer == prefix:
+                # Check if the action_buffer still matches the prefix of [ACTION] or [CLARIFY]
+                if prefix_action.startswith(self.action_buffer) or prefix_clarify.startswith(self.action_buffer):
+                    if self.action_buffer == prefix_action:
                         self.halted = True
+                    elif self.action_buffer == prefix_clarify:
+                        config.WAITING_FOR_CLARIFICATION = True
+                        self.action_buffer = ""
+                        self.potential_action = False
                 else:
                     # Deviancy! Flush back
                     self.conversational_buffer += self.action_buffer
@@ -92,6 +97,9 @@ class TokenTextFilter:
         return emitted
 
     def finalize(self) -> str:
+        if "[CLARIFY]" in self.action_buffer:
+            config.WAITING_FOR_CLARIFICATION = True
+            self.action_buffer = self.action_buffer.replace("[CLARIFY]", "")
         if not self.halted:
             return self.conversational_buffer + self.action_buffer
         return ""
@@ -105,6 +113,24 @@ def llm_worker_thread(model_path: str):
     memory_agent = BHAIMemoryEngine()
     print("🚀 In-Process LLaMA Engine & Relational Memory Ready.")
     
+    enqueued_sentences = []
+    has_explicit_clarify = False
+
+    def enqueue_sentence(clean_sentence: str):
+        nonlocal has_explicit_clarify
+        text = clean_sentence.strip()
+        if len(text) <= 1:
+            return
+            
+        # Clean any explicit suffixes if present
+        if "[CLARIFY]" in text:
+            has_explicit_clarify = True
+            text = text.replace("[CLARIFY]", "").strip()
+            
+        if len(text) > 1:
+            config.SENTENCE_QUEUE.put(text)
+            enqueued_sentences.append(text)
+
     while True:
         try:
             # Poll either STT queue or LATEST_USER_TEXT register
@@ -125,12 +151,17 @@ def llm_worker_thread(model_path: str):
             if config.INTERRUPT_FLAG.is_set() or config.BARGE_IN_TRIGGERED:
                 continue
 
+            config.LLM_TURN_ACTIVE = True
+
             # 1. CHRONICLE USER INPUT & FETCH CONTEXT MEMORIES
             memory_agent.log_turn("user", user_input)
             injected_context = memory_agent.retrieve_context(user_input)
 
             config.LLM_ACTIVE = True
             config.SPEECH_IN_PROGRESS = True
+            enqueued_sentences.clear()
+            has_explicit_clarify = False
+            config.WAITING_FOR_CLARIFICATION = False
             
             # Tier-0 Quick Automation Trigger Check (without running full model)
             normalized_text = user_input.lower()
@@ -155,9 +186,7 @@ def llm_worker_thread(model_path: str):
                 memory_agent.log_turn("bhai", ai_response)
                 
                 normalized_response = LinguisticNormalizer.normalize_text(ai_response)
-                clean_sentence = normalized_response.strip()
-                if len(clean_sentence) > 1:
-                    config.SENTENCE_QUEUE.put(clean_sentence)
+                enqueue_sentence(normalized_response)
                 config.LLM_ACTIVE = False
                 continue
 
@@ -225,43 +254,53 @@ def llm_worker_thread(model_path: str):
                     
                 # Direct text chunks cleanly to the sentence buffer
                 for sentence in splitter.process_chunk(clean_text):
-                    clean_sentence = sentence.strip()
-                    # CRITICAL CONCURRENCY FIX: Guard empty flush & require printable text
-                    if len(clean_sentence) > 1:
-                        config.SENTENCE_QUEUE.put(clean_sentence)
+                    enqueue_sentence(sentence)
                         
             # Flush trailing strings left inside the sentence tokenizer memory context
             final_text = filter_handler.finalize()
             for sentence in splitter.process_chunk(final_text):
-                clean_sentence = sentence.strip()
-                if len(clean_sentence) > 1 and not (config.BARGE_IN_TRIGGERED or config.INTERRUPT_FLAG.is_set()):
-                    config.SENTENCE_QUEUE.put(clean_sentence)
+                if not (config.BARGE_IN_TRIGGERED or config.INTERRUPT_FLAG.is_set()):
+                    enqueue_sentence(sentence)
                     
             for sentence in splitter.flush():
-                clean_sentence = sentence.strip()
-                if len(clean_sentence) > 1 and not (config.BARGE_IN_TRIGGERED or config.INTERRUPT_FLAG.is_set()):
-                    config.SENTENCE_QUEUE.put(clean_sentence)
-
+                if not (config.BARGE_IN_TRIGGERED or config.INTERRUPT_FLAG.is_set()):
+                    enqueue_sentence(sentence)
+ 
             # If an action was matched and buffered, parse and execute it
             if filter_handler.halted and filter_handler.action_buffer:
                 print(f"⚙️ Action detected. Parsing action block: {filter_handler.action_buffer!r}")
                 action_msg = NativeLinuxAutomator.extract_and_execute_json(filter_handler.action_buffer)
                 if action_msg:
                     normalized_action = LinguisticNormalizer.normalize_text(action_msg)
-                    clean_sentence = normalized_action.strip()
-                    if len(clean_sentence) > 1 and not (config.BARGE_IN_TRIGGERED or config.INTERRUPT_FLAG.is_set()):
-                        config.SENTENCE_QUEUE.put(clean_sentence)
+                    if not (config.BARGE_IN_TRIGGERED or config.INTERRUPT_FLAG.is_set()):
+                        enqueue_sentence(normalized_action)
+ 
+            # Determine WAITING_FOR_CLARIFICATION based on the entire turn's final state
+            config.WAITING_FOR_CLARIFICATION = False
+            if has_explicit_clarify:
+                config.WAITING_FOR_CLARIFICATION = True
+                print("🔍 [SYSTEM-FIX] Explicit [CLARIFY] tag detected in LLM response.")
+            elif enqueued_sentences:
+                last_text = enqueued_sentences[-1].strip()
+                if last_text.endswith("?") or any(kw in last_text.lower() for kw in ["right?", "agree?", "you think?", "your take?"]):
+                    config.WAITING_FOR_CLARIFICATION = True
+                    print(f"🔍 [SYSTEM-FIX] Question punctuation/keyword detected in final sentence: {last_text!r}. Engaging Interactive Clarification Loop.")
 
             # 2. LOG BOT RESPONSE & PASSIVELY PARSE NEW FACTS
             if not (config.BARGE_IN_TRIGGERED or config.INTERRUPT_FLAG.is_set()) and full_response_accumulated.strip():
-                memory_agent.log_turn("bhai", full_response_accumulated.strip())
+                clean_log_response = full_response_accumulated.strip()
+                if "[CLARIFY]" in clean_log_response:
+                    clean_log_response = clean_log_response.replace("[CLARIFY]", "").strip()
+                memory_agent.log_turn("bhai", clean_log_response)
                 # Learn new things while returning back to idle states
                 memory_agent.extract_and_store_entities(user_input)
                 
             config.LLM_ACTIVE = False
             config.BARGE_IN_TRIGGERED = False
+            config.LLM_TURN_ACTIVE = False
             
         except Exception as e:
             print(f"❌ LLM Thread Exception: {e}")
             config.LLM_ACTIVE = False
+            config.LLM_TURN_ACTIVE = False
             time.sleep(0.1)

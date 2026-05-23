@@ -82,8 +82,16 @@ class BHAIMemoryEngine:
         Vectorless Hybrid Context Fetch. Matches tokens against the text-graph indices 
         and extracts chronological logs under 0.5ms.
         """
-        # Tokenize words, filtering out common short words/stopwords
+        # Stopwords filter to prevent generic conversational tokens from matching custom entities
+        STOPWORDS = {
+            "WHAT", "WANT", "WITH", "ABOUT", "THIS", "THAT", "FROM", "YOUR", "HAVE", "TELL", 
+            "MAKE", "RUNS", "PORT", "BACKEND", "PROJECT", "DIFFERENCE", "WATCH", "COIN", 
+            "GIVE", "SOME", "THINK", "KNOW", "THEM", "THEY", "THEIR", "COULD", "WOULD", "SHOULD",
+            "HERE", "THERE", "WHEN", "WHERE", "WHICH", "OTHER", "MORE", "LESS", "MANY", "VERY",
+            "LIKE", "JUST", "EVEN", "ONLY", "ALSO", "THAN", "THEN", "INTO", "OVER", "DOWN"
+        }
         words = [w.strip("?,.!:\"'").upper() for w in user_input.split() if len(w) > 3]
+        words = [w for w in words if w not in STOPWORDS]
         if not words:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()

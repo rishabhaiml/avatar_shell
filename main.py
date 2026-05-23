@@ -236,7 +236,9 @@ def trigger_barge_in_interrupt():
     # Restore pre-roll context
     config.command_audio_buffer = bytearray()
     for chunk in config.PRE_ROLL_BUFFER:
-        config.command_audio_buffer.extend(chunk)
+        c_np = np.frombuffer(chunk, dtype=np.int16)
+        clean_c = (c_np - np.mean(c_np)).astype(np.int16).tobytes()
+        config.command_audio_buffer.extend(clean_c)
     config.PRE_ROLL_BUFFER.clear()
     
     config.VAD_ACCUMULATOR = np.array([], dtype=np.int16)
@@ -264,6 +266,32 @@ def process_audio_queue() -> bool:
     Evaluates volumes and changes states safely in the main loop thread.
     """
     try:
+        if config.CURRENT_STATE == config.AppState.ROOM_COOLDOWN_FOLLOW_UP:
+            # Flush the mic queue completely to dump lingering playout echo
+            while not config.AUDIO_FRAME_QUEUE.empty():
+                try:
+                    config.AUDIO_FRAME_QUEUE.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Check if 300ms has elapsed
+            if time.time() >= config.cooldown_end_time:
+                print("⏱️ Room acoustic decay completed. Starting FOLLOW_UP_LISTENING...")
+                config.command_audio_buffer = bytearray()
+                config.VAD_ACCUMULATOR = np.array([], dtype=np.int16)
+                config.LISTENING_FRAMES = []
+                config.total_listening_frames = 0
+                config.speech_active = False
+                config.consecutive_loud = 0
+                config.consecutive_quiet = 0
+                
+                # Transition to proactive listening and notify visualizer
+                config.CURRENT_STATE = config.AppState.FOLLOW_UP_LISTENING
+                if config.SEND_UI_STATE_CALLBACK:
+                    config.SEND_UI_STATE_CALLBACK(listening=True)
+                    
+                config.listening_start_time = time.time()
+            return True
         while True:
             try:
                 raw_chunk = config.AUDIO_FRAME_QUEUE.get_nowait()
@@ -334,7 +362,9 @@ def process_audio_queue() -> bool:
                         
                     config.command_audio_buffer = bytearray()
                     for chunk in config.PRE_ROLL_BUFFER:
-                        config.command_audio_buffer.extend(chunk)
+                        c_np = np.frombuffer(chunk, dtype=np.int16)
+                        clean_c = (c_np - np.mean(c_np)).astype(np.int16).tobytes()
+                        config.command_audio_buffer.extend(clean_c)
                     config.PRE_ROLL_BUFFER.clear()
                     config.VAD_ACCUMULATOR = np.array([], dtype=np.int16)
                     config.LISTENING_FRAMES = []
@@ -346,6 +376,20 @@ def process_audio_queue() -> bool:
             # If the speaker is currently active (playing back responses), discard frames
             # in the IDLE/THINKING states to completely block echo contamination.
             if config.CURRENT_STATE in [config.AppState.IDLE, config.AppState.THINKING] and (config.SPEAKER_ACTIVE or config.TTS_PROCESSING or not config.SPEECH_PLAYBACK_QUEUE.empty()):
+                continue
+
+            # Proactive State Routing: Transition to ROOM_COOLDOWN_FOLLOW_UP or IDLE when speaking/thinking ends
+            if config.CURRENT_STATE == config.AppState.THINKING and not config.SPEECH_IN_PROGRESS and not config.LLM_TURN_ACTIVE:
+                if config.WAITING_FOR_CLARIFICATION:
+                    print("\n📣 CLARIFICATION LOOP ACTIVE: Starting playout tail isolation cooldown...")
+                    config.WAITING_FOR_CLARIFICATION = False # Consume flag
+                    config.cooldown_end_time = time.time() + 0.30
+                    config.CURRENT_STATE = config.AppState.ROOM_COOLDOWN_FOLLOW_UP
+                else:
+                    print("⏱️ Turn completed. Returning to IDLE state.")
+                    config.CURRENT_STATE = config.AppState.IDLE
+                    if config.SEND_UI_STATE_CALLBACK:
+                        config.SEND_UI_STATE_CALLBACK(listening=False, thinking=False)
                 continue
 
             audio_i16 = np.frombuffer(raw_chunk, dtype=np.int16)
@@ -405,77 +449,120 @@ def process_audio_queue() -> bool:
             elif config.CURRENT_STATE == config.AppState.SPEAKING:
                 continue
 
-            elif config.CURRENT_STATE == config.AppState.LISTENING:
-                config.LISTENING_FRAMES.append(raw_chunk)
-                config.command_audio_buffer.extend(raw_chunk)
+            elif config.CURRENT_STATE in [config.AppState.LISTENING, config.AppState.FOLLOW_UP_LISTENING]:
+                # High-Fidelity Local DC-Offset Removal Filter
+                chunk_np = np.frombuffer(raw_chunk, dtype=np.int16)
+                clean_np = (chunk_np - np.mean(chunk_np)).astype(np.int16)
+                clean_chunk = clean_np.tobytes()
+
+                config.LISTENING_FRAMES.append(clean_chunk)
+                config.command_audio_buffer.extend(clean_chunk)
                 config.total_listening_frames += 1
 
-                # Sub-chunk slicing for WebRTC VAD inputs (480-sample blocks)
-                config.VAD_ACCUMULATOR = np.concatenate((config.VAD_ACCUMULATOR, audio_i16))
+                # Sub-chunk slicing for WebRTC VAD inputs using clean centered samples
+                config.VAD_ACCUMULATOR = np.concatenate((config.VAD_ACCUMULATOR, clean_np))
                 while len(config.VAD_ACCUMULATOR) >= 480:
                     sub_chunk = config.VAD_ACCUMULATOR[:480]
                     config.VAD_ACCUMULATOR = config.VAD_ACCUMULATOR[480:]
 
                     sub_chunk_arr = np.frombuffer(sub_chunk, dtype=np.int16) if isinstance(sub_chunk, bytes) else sub_chunk
-                    sub_volume = float(np.sqrt(np.mean(np.square(sub_chunk_arr.astype(np.float32)))))
-                    
                     sub_bytes = sub_chunk.tobytes()
                     
+                    # We run the VAD but ignore standard VAD return triggers for follow-up listening
                     should_trigger = run_adaptive_snr_vad(sub_bytes, COMMAND_VAD)
-                    if should_trigger:
+                    if config.CURRENT_STATE == config.AppState.LISTENING and should_trigger:
                         break
                 
                 # Check for transition conditions or timeout limits
-                # Grace timeout check
-                if not config.speech_active and config.total_listening_frames > 200:
-                    print("⚠️ Grace period expired. No speech detected.")
-                    if config.SEND_UI_STATE_CALLBACK:
-                        config.SEND_UI_STATE_CALLBACK(listening=False)
-                    config.WAKE_COOLDOWN = time.time() + 1.5
-                    config.COOLDOWN_ACTIVE = True
-                    config.CURRENT_STATE = config.AppState.IDLE
-                    config.LISTENING_FRAMES.clear()
-                    break
+                if config.CURRENT_STATE == config.AppState.FOLLOW_UP_LISTENING:
+                    # 1. Trailing silence cut-off check (20 frames ~ 600ms)
+                    if config.speech_active and config.consecutive_quiet >= 20:
+                        elapsed = time.time() - config.listening_start_time
+                        print(f"⏱️ Voice capture completed (Snappy Follow-up) in {elapsed:.2f}s. Dispatching to STT...")
+                        
+                        if config.SEND_UI_STATE_CALLBACK:
+                            config.SEND_UI_STATE_CALLBACK(listening=False, thinking=True)
+                        config.CURRENT_STATE = config.AppState.THINKING
+                        config.SPEECH_IN_PROGRESS = True
+                        config.LLM_TURN_ACTIVE = True
+                        config.STT_STREAM_QUEUE.put(bytes(config.command_audio_buffer))
+                        
+                        config.OWW_ACCUMULATOR.clear()
+                        config.PRE_ROLL_BUFFER.clear()
+                        if WAKE_MODEL:
+                            try: 
+                                WAKE_MODEL.reset()
+                            except Exception: 
+                                pass
+                        config.WAKE_COOLDOWN = time.time() + 1.5
+                        break
+                    
+                    # 2. Maximum dynamic open mic timeout check (5.0 seconds)
+                    elif time.time() - config.listening_start_time >= 5.0:
+                        print("⚠️ Follow-up open mic timeout (5.0s reached) without completed speech. Standing down.")
+                        if config.SEND_UI_STATE_CALLBACK:
+                            config.SEND_UI_STATE_CALLBACK(listening=False)
+                        config.WAKE_COOLDOWN = time.time() + 1.0
+                        config.COOLDOWN_ACTIVE = True
+                        config.CURRENT_STATE = config.AppState.IDLE
+                        config.LISTENING_FRAMES.clear()
+                        break
+                
+                else:  # Standard AppState.LISTENING checks
+                    # Grace timeout check
+                    if not config.speech_active and config.total_listening_frames > 200:
+                        print("⚠️ Grace period expired. No speech detected.")
+                        if config.SEND_UI_STATE_CALLBACK:
+                            config.SEND_UI_STATE_CALLBACK(listening=False)
+                        config.WAKE_COOLDOWN = time.time() + 1.5
+                        config.COOLDOWN_ACTIVE = True
+                        config.CURRENT_STATE = config.AppState.IDLE
+                        config.LISTENING_FRAMES.clear()
+                        break
 
-                # Completed conversational turn check (consecutive silence)
-                if config.speech_active and config.consecutive_quiet >= 66:
-                    elapsed = time.time() - config.listening_start_time
-                    print(f"⏱️ Voice capture completed in {elapsed:.2f}s. Dispatching to STT...")
-                    
-                    if config.SEND_UI_STATE_CALLBACK:
-                        config.SEND_UI_STATE_CALLBACK(listening=False, thinking=True)
-                    config.CURRENT_STATE = config.AppState.THINKING
-                    config.STT_STREAM_QUEUE.put(bytes(config.command_audio_buffer))
-                    
-                    config.OWW_ACCUMULATOR.clear()
-                    config.PRE_ROLL_BUFFER.clear()
-                    if WAKE_MODEL:
-                        try: 
-                            WAKE_MODEL.reset()
-                        except Exception: 
-                            pass
-                    config.WAKE_COOLDOWN = time.time() + 1.5
-                    break
+                    # Completed conversational turn check (consecutive silence)
+                    if config.speech_active and config.consecutive_quiet >= 66:
+                        elapsed = time.time() - config.listening_start_time
+                        print(f"⏱️ Voice capture completed in {elapsed:.2f}s. Dispatching to STT...")
+                        
+                        if config.SEND_UI_STATE_CALLBACK:
+                            config.SEND_UI_STATE_CALLBACK(listening=False, thinking=True)
+                        config.CURRENT_STATE = config.AppState.THINKING
+                        config.SPEECH_IN_PROGRESS = True
+                        config.LLM_TURN_ACTIVE = True
+                        config.STT_STREAM_QUEUE.put(bytes(config.command_audio_buffer))
+                        
+                        config.OWW_ACCUMULATOR.clear()
+                        config.PRE_ROLL_BUFFER.clear()
+                        if WAKE_MODEL:
+                            try: 
+                                WAKE_MODEL.reset()
+                            except Exception: 
+                                pass
+                        config.WAKE_COOLDOWN = time.time() + 1.5
+                        break
 
-                # Absolute maximum recording threshold check (24 seconds)
-                if config.total_listening_frames >= 300:
-                    elapsed = time.time() - config.listening_start_time
-                    print(f"⏱️ Maximum recording limit reached ({elapsed:.2f}s). Dispatching...")
-                    
-                    if config.SEND_UI_STATE_CALLBACK:
-                        config.SEND_UI_STATE_CALLBACK(listening=False, thinking=True)
-                    config.CURRENT_STATE = config.AppState.THINKING
-                    config.STT_STREAM_QUEUE.put(bytes(config.command_audio_buffer))
-                    
-                    config.OWW_ACCUMULATOR.clear()
-                    config.PRE_ROLL_BUFFER.clear()
-                    if WAKE_MODEL:
-                        try: 
-                            WAKE_MODEL.reset()
-                        except Exception: 
-                            pass
-                    config.WAKE_COOLDOWN = time.time() + 1.5
-                    break
+                    # Absolute maximum recording threshold check (24 seconds)
+                    if config.total_listening_frames >= 300:
+                        elapsed = time.time() - config.listening_start_time
+                        print(f"⏱️ Maximum recording limit reached ({elapsed:.2f}s). Dispatching...")
+                        
+                        if config.SEND_UI_STATE_CALLBACK:
+                            config.SEND_UI_STATE_CALLBACK(listening=False, thinking=True)
+                        config.CURRENT_STATE = config.AppState.THINKING
+                        config.SPEECH_IN_PROGRESS = True
+                        config.LLM_TURN_ACTIVE = True
+                        config.STT_STREAM_QUEUE.put(bytes(config.command_audio_buffer))
+                        
+                        config.OWW_ACCUMULATOR.clear()
+                        config.PRE_ROLL_BUFFER.clear()
+                        if WAKE_MODEL:
+                            try: 
+                                WAKE_MODEL.reset()
+                            except Exception: 
+                                pass
+                        config.WAKE_COOLDOWN = time.time() + 1.5
+                        break
 
     except Exception as e:
         print(f"⚠️ Audio state machine tracker crash handled gracefully: {e}")

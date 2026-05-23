@@ -18,6 +18,8 @@ class AppState(Enum):
     LISTENING = "LISTENING"
     THINKING = "THINKING"
     SPEAKING = "SPEAKING"
+    FOLLOW_UP_LISTENING = "FOLLOW_UP_LISTENING"
+    ROOM_COOLDOWN_FOLLOW_UP = "ROOM_COOLDOWN_FOLLOW_UP"
 
 # --- CORE CONCURRENT QUEUE CHANNELS ---
 AUDIO_FRAME_QUEUE = queue.Queue()
@@ -36,11 +38,13 @@ CURRENT_STATE = AppState.IDLE
 WAKE_COOLDOWN = 0.0
 COOLDOWN_ACTIVE = False
 LLM_ACTIVE = False
+LLM_TURN_ACTIVE = False
 SYNTHESIS_ACTIVE = False
 BARGE_IN_TRIGGERED = False
 SPEECH_IN_PROGRESS = False
 TTS_PROCESSING = False
 SPEAKER_ACTIVE = False
+WAITING_FOR_CLARIFICATION = False
 
 # --- ADAPTIVE AUDIO ENGINE REGISTERS ---
 ambient_noise_rms = 400.0
@@ -68,7 +72,8 @@ SYSTEM_PROMPT = (
     "2. KEEP IT SHORT. Never speak more than 2 or 3 sentences at a time.\n"
     "3. PASS THE BALL. Frequently end your responses with a thought-provoking question, an opinionated hot-take, or by asking the user for their perspective to keep the conversation flowing.\n"
     "4. If the user asks a factual question, give a quick answer and immediately ask a related follow-up to spark a discussion.\n"
-    "5. Do NOT wrap your reply in JSON or markdown blocks. If you need to execute a system command, append the exact string `[ACTION]` followed by the JSON payload at the absolute end of your response.\n\n"
+    "5. Do NOT wrap your reply in JSON or markdown blocks. If you need to execute a system command, append the exact string `[ACTION]` followed by the JSON payload at the absolute end of your response.\n"
+    "6. CRITICAL DIRECTIVE: If your response asks the user a question, or requests a follow-up, clarification, or opinion, you MUST conclude your entire thought with the explicit symbol [CLARIFY]. Example: \"What do you think? [CLARIFY]\"\n\n"
     "Available system actions:\n"
     "- Screenshot: [ACTION] {\"action\": \"screenshot\"}\n"
     "- Open terminal: [ACTION] {\"action\": \"open_app\", \"target\": \"terminal\"}\n"
