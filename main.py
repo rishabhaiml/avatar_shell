@@ -284,6 +284,8 @@ def process_audio_queue() -> bool:
                 config.speech_active = False
                 config.consecutive_loud = 0
                 config.consecutive_quiet = 0
+                config.DYNAMIC_SILENCE_LIMIT = 20
+                config.CADENCE_CHECK_IN_PROGRESS = False
                 
                 # Transition to proactive listening and notify visualizer
                 config.CURRENT_STATE = config.AppState.FOLLOW_UP_LISTENING
@@ -473,29 +475,55 @@ def process_audio_queue() -> bool:
                     if config.CURRENT_STATE == config.AppState.LISTENING and should_trigger:
                         break
                 
-                # Check for transition conditions or timeout limits
                 if config.CURRENT_STATE == config.AppState.FOLLOW_UP_LISTENING:
-                    # 1. Trailing silence cut-off check (20 frames ~ 600ms)
-                    if config.speech_active and config.consecutive_quiet >= 20:
-                        elapsed = time.time() - config.listening_start_time
-                        print(f"⏱️ Voice capture completed (Snappy Follow-up) in {elapsed:.2f}s. Dispatching to STT...")
-                        
-                        if config.SEND_UI_STATE_CALLBACK:
-                            config.SEND_UI_STATE_CALLBACK(listening=False, thinking=True)
-                        config.CURRENT_STATE = config.AppState.THINKING
-                        config.SPEECH_IN_PROGRESS = True
-                        config.LLM_TURN_ACTIVE = True
-                        config.STT_STREAM_QUEUE.put(bytes(config.command_audio_buffer))
-                        
-                        config.OWW_ACCUMULATOR.clear()
-                        config.PRE_ROLL_BUFFER.clear()
-                        if WAKE_MODEL:
-                            try: 
-                                WAKE_MODEL.reset()
-                            except Exception: 
-                                pass
-                        config.WAKE_COOLDOWN = time.time() + 1.5
-                        break
+                    # 1. Trailing silence cut-off check (dynamic limit frames)
+                    if config.speech_active:
+                        if config.consecutive_quiet == 1 and not config.CADENCE_CHECK_IN_PROGRESS:
+                            # User just paused! Spawn background thread to check trailing cadence
+                            config.CADENCE_CHECK_IN_PROGRESS = True
+                            
+                            def check_trailing_cadence(audio_snapshot):
+                                global STT_MODEL
+                                try:
+                                    if STT_MODEL:
+                                        audio_np = np.frombuffer(audio_snapshot, dtype=np.int16).astype(np.float32) / 32768.0
+                                        segments, _ = STT_MODEL.transcribe(audio_np, language="en", beam_size=1)
+                                        partial_text = " ".join(seg.text for seg in segments).strip().lower()
+                                        
+                                        CONJUNCTIONS = ["because", "but", "so", "and", "or", "if", "then", "like"]
+                                        words = partial_text.split()
+                                        if words and words[-1] in CONJUNCTIONS:
+                                            config.DYNAMIC_SILENCE_LIMIT = 40  # Scale limit to 1200ms
+                                            print(f"🔍 [CADENCE-BACKOFF] Trailing conjunction detected ({words[-1]!r}). Scaling silence floor to 1200ms.")
+                                except Exception as e:
+                                    pass
+                                finally:
+                                    config.CADENCE_CHECK_IN_PROGRESS = False
+
+                            import threading
+                            snapshot_bytes = bytes(config.command_audio_buffer)
+                            threading.Thread(target=check_trailing_cadence, args=(snapshot_bytes,), daemon=True).start()
+
+                        if config.consecutive_quiet >= config.DYNAMIC_SILENCE_LIMIT:
+                            elapsed = time.time() - config.listening_start_time
+                            print(f"⏱️ Voice capture completed (Snappy Follow-up) in {elapsed:.2f}s (Limit: {config.DYNAMIC_SILENCE_LIMIT}). Dispatching...")
+                            
+                            if config.SEND_UI_STATE_CALLBACK:
+                                config.SEND_UI_STATE_CALLBACK(listening=False, thinking=True)
+                            config.CURRENT_STATE = config.AppState.THINKING
+                            config.SPEECH_IN_PROGRESS = True
+                            config.LLM_TURN_ACTIVE = True
+                            config.STT_STREAM_QUEUE.put(bytes(config.command_audio_buffer))
+                            
+                            config.OWW_ACCUMULATOR.clear()
+                            config.PRE_ROLL_BUFFER.clear()
+                            if WAKE_MODEL:
+                                try: 
+                                    WAKE_MODEL.reset()
+                                except Exception: 
+                                    pass
+                            config.WAKE_COOLDOWN = time.time() + 1.5
+                            break
                     
                     # 2. Maximum dynamic open mic timeout check (5.0 seconds)
                     elif time.time() - config.listening_start_time >= 5.0:

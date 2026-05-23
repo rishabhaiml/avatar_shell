@@ -1,63 +1,78 @@
-# Avatar Shell
+# B.H.A.I. Avatar Shell 🎤🤖
 
-Avatar Shell is a highly interactive, voice-driven AI assistant featuring a 3D visual avatar. It bridges local language models (LLMs), fast voice activity detection (VAD), text-to-speech (TTS) via Kokoro/Piper, and WebRTC elements to present a comprehensive, interlocked audiovisual experience.
-
-## 🧠 Project Architecture
-
-* **`audio/`**: Handles the Voice Activity Detection (VAD) and audio processing pipeline (using `webrtcvad`, `faster-whisper`, `openwakeword`).
-* **`brain/`**: The core logic driver, connecting user input to generating responses via the underlying LLM (powered by `llama-cpp-python`) and normalizing conversation flows.
-* **`memory/`**: Engine and systems to maintain short and long-term conversation history context.
-* **`ui/` & `www/`**: A combined front-end utilizing a 3D VRM model rendered in a web environment, communicating over WebSockets with the Python backend.
+B.H.A.I. (Behavioral Humanlike AI) is a highly interactive, voice-driven local AI assistant featuring a stunning, real-time animated 3D avatar. It bridges local language models (LLMs), fast voice activity detection (VAD), off-line Text-to-Speech (TTS) via Kokoro ONNX, and WebSockets to deliver a full-duplex conversational experience (Jarvis-Symmetry).
 
 ---
 
-## 🚀 Installation & Setup Guide
+## 🏛️ Project Architecture
 
-### 1. Python Environment Setup
-We recommend using standard Python virtual environments or `uv` for managing dependencies. The project requires Python 3.12+.
+* **`main.py`**: The central orchestrator bootstrapping GTK, WebKit, websockets, and background audio/cognitive thread systems.
+* **`audio/`**: Hardware audio capture, playback buffers, and noise-purified WebRTC VAD + openWakeWord + fast Whisper STT.
+* **`brain/`**: The local LLM inference driver (via `llama-cpp-python`) and off-line Kokoro speech synthesizer.
+* **`ui/`**: Translucent GTK 4 + WebKit window layers supporting Wayland Overlay positioning.
+* **`www/`**: 3D VRM avatar scene using Three.js and `@pixiv/three-vrm` with volume-driven lip sync.
+* **`memory/`**: Vectorless cognitive stopword relevance database engine tracking long-term developer graphs.
+
+---
+
+## ⚡ Quick Start (Setup & Installation)
+
+The project leverages modern Python packaging via `uv`. You can clone, synchronize dependencies, download the assets, and boot B.H.A.I. in a few minutes.
+
+### 1. Clone the Repository & Sync Dependencies
+
+Make sure you have [uv](https://github.com/astral-sh/uv) installed, then execute:
 
 ```bash
-# Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/rishabhaiml/avatar_shell.git
+cd avatar_shell
 
-# Install dependencies via pip
-pip install -r requirements.txt
-# OR if using `uv` with pyproject.toml
-uv pip install -e .
+# Sync all virtualenv dependencies automatically
+uv sync
 ```
 
-### 2. Large Assets & Models Download
-To keep this repository lightweight, large artifacts like AI models, binaries, and weights have been ignored in version control (`.gitignore`). Before you run the project, please download and organize the following components:
+### 2. Download Large Assets & Models
 
-#### A. LLM Model (Brain)
-Download your preferred `.gguf` model (e.g., Llama 3, Mistral, etc.) from [HuggingFace GGUF Models](https://huggingface.co/models?search=gguf) and place it directly in the project root folder.
-* **Path:** `./model.gguf`
+To keep the repository lightweight, large model weights and avatar assets are excluded from Git. Download them and place them in their respective paths:
 
-#### B. Kokoro TTS Weights
-The engine leverages Kokoro for ultra-realistic Text-to-Speech.
-* **Download:** Grab the `v1.0` weights and lexicon mappings from the [Kokoro-82M HuggingFace Repository](https://huggingface.co/hexgrad/Kokoro-82M).
-* **Path:** Place the contents (like `lexicon-us-en.txt`, etc.) in `./weights/kokoro-v1.0/`
+#### A. Avatar VRM & Brain GGUF Models
+We have hosted pre-aligned models on our release page:
+👉 **[Download Models from Release Page](https://github.com/rishabhaiml/avatar_shell/releases/tag/model)**
 
-#### C. Piper TTS Binaries
-We use Piper for localized, speedy fallback/alternate TTS processing. 
-* **Download:** Get the built binaries for your specific OS (Linux/Windows/macOS) from [Rhasspy Piper Releases](https://github.com/rhasspy/piper/releases).
-* **Path:** Extract the binaries into the `./piper/` directory (you should see items like `piper`, `piper_phonemize`, `libonnxruntime.so.*`).
+1. Download **`model.vrm`** and place it in the `www/` folder:
+   * **Target Path:** `www/model.vrm` (Double cache-busters are active to refresh changes instantly!)
+2. Download the GGUF LLM model (e.g. **`model.gguf`**) and place it in the project root directory:
+   * **Target Path:** `./model.gguf`
 
-#### D. Ensure Your 3D Avatar (VRM File)
-To visualize the agent, provide a standard `.vrm` file. You can download starter avatars from [VRoid Hub](https://hub.vroid.com/en/).
-* **Path:** `./www/model.vrm`
+#### B. Off-line Kokoro TTS Weights
+B.H.A.I. utilizes Kokoro v1.0 running natively under `sherpa-onnx` for high-fidelity speech synthesis. 
+
+Run the following commands to create the target directory, download, and unpack the compiled weights:
+
+```bash
+# Create weights directory
+mkdir -p weights
+
+# Download the C++ ready offline Kokoro bundle
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-v1.0.tar.bz2
+
+# Extract and clean up the archive
+tar xf kokoro-v1.0.tar.bz2 -C weights/
+rm kokoro-v1.0.tar.bz2
+```
+* **Verify Path:** Ensure you have `./weights/kokoro-v1.0/model.onnx` and `./weights/kokoro-v1.0/voices.bin` in place.
 
 ---
 
-## 🎮 Running the Project
+## 🎮 Running the Avatar
 
-Once all dependencies are installed and the models/assets are situated in their respective directories, simply launch the backend application!
+Once the models and weights are configured in the directories, start the assistant by launching the main script:
 
 ```bash
 uv run main.py
-# OR
-python main.py
 ```
 
-The system will initialize the voice pipelines, boot up the local LLM, and launch the localized UI rendering the interactions. Enjoy your new Avatar assistant!
+### Features at Runtime:
+* **Attentive Listening & Lip Sync**: B.H.A.I. features responsive, volume-driven smooth facial lip-sync with random eye blinks.
+* **Premium Voice Configuration**: Equipped with the highly expressive American Male voice **Michael** (`am_michael` - index `16` in `voices.bin`).
+* **Double-Layer Cache Bypassing**: Both WebKit and Three.js are configured with dynamic timestamp query parameters, meaning any updates to your `./www/model.vrm` file are picked up instantly without restarting your browser or purging caches.

@@ -28,8 +28,8 @@ def kokoro_synthesizer_worker():
     # Instantiate the compiled native offline TTS engine
     tts_engine = sherpa_onnx.OfflineTts(cfg)
     
-    # Target voice ID matching the standard fallback
-    target_speaker_id = 0
+    # Target voice ID matching am_michael in this binary layout (ID 16, pitch 118.8 Hz)
+    target_speaker_id = 16
     print("🚀 Native Kokoro Synthesis Worker Ready.")
     
     while True:

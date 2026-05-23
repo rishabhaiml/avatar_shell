@@ -84,8 +84,9 @@ class AvatarApp(Gtk.Application):
         rgba.parse("rgba(0, 0, 0, 0)")
         self.webview.set_background_color(rgba)
         
-        # Load local webserver URL (falling back to a static offline styled page if needed)
-        self.webview.load_uri("http://127.0.0.1:8000/index.html")
+        # Load local webserver URL with dynamic cache-bypassing timestamp
+        import time
+        self.webview.load_uri(f"http://127.0.0.1:8000/index.html?v={int(time.time())}")
 
         # Create overlay stack to house the Webview and Custom Toolbar cleanly
         self.main_overlay = Gtk.Overlay.new()

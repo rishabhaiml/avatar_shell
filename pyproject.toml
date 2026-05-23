@@ -19,4 +19,7 @@ dependencies = [
     "soundfile>=0.13.1",
     "webrtcvad>=2.0.10",
     "websockets>=16.0",
+    "sherpa-onnx>=1.13.2",
+    "sherpa-onnx-core>=1.13.2",
+    "graphifyy>=0.8.15",
 ]
