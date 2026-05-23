@@ -1,0 +1,119 @@
+import time
+import queue
+import pyaudio
+import numpy as np
+from gi.repository import GLib
+import config
+from audio.vad import calculate_frame_rms
+
+def audio_hardware_capture_loop(pyaudio_instance: pyaudio.PyAudio):
+    """
+    Main thread running the physical soundcard input stream pipeline.
+    """
+    stream = pyaudio_instance.open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=config.RATE,
+        input=True,
+        frames_per_buffer=config.CHUNK
+    )
+    
+    print("mic: Opening thread-safe background capture channels...")
+    
+    while True:
+        try:
+            raw_bytes = stream.read(config.CHUNK, exception_on_overflow=False)
+            config.AUDIO_FRAME_QUEUE.put(raw_bytes)
+        except Exception as e:
+            print(f"⚠️ Soundcard hardware record drop: {e}")
+            time.sleep(0.01)
+
+def playback_worker_thread(pyaudio_instance: pyaudio.PyAudio, flush_callback=None):
+    """
+    Main thread running the hardware speech output playback stream and real-time lip sync visemes.
+    """
+    # Open speaker stream natively at 24000Hz (matching Kokoro output rate)
+    speaker_stream = pyaudio_instance.open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=24000,
+        output=True,
+        frames_per_buffer=512
+    )
+    
+    print("speaker: Opening thread-safe background playback channels...")
+    
+    while True:
+        try:
+            audio_bytes = config.SPEECH_PLAYBACK_QUEUE.get(timeout=0.05)
+            if audio_bytes is None:
+                break
+                
+            config.SPEAKER_ACTIVE = True
+            config.SPEECH_IN_PROGRESS = True
+            
+            if config.INTERRUPT_FLAG.is_set():
+                continue
+            
+            audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+            total_frames = len(audio_np)
+            
+            chunk_size = 512
+            current_frame = 0
+            current_aa, current_ee, current_ih, current_oh, current_ou = 0.0, 0.0, 0.0, 0.0, 0.0
+            smoothing = 0.5
+            
+            while current_frame < total_frames:
+                if config.INTERRUPT_FLAG.is_set():
+                    print("🛑 Playback interrupted!")
+                    break
+                    
+                end_frame = min(current_frame + chunk_size, total_frames)
+                audio_array = audio_np[current_frame:end_frame]
+                data = audio_array.tobytes()
+                
+                # Calculate real-time intensity visemes
+                vol = float(np.sqrt(np.mean(np.square(audio_array.astype(np.float32)))))
+                if vol < 150: 
+                    target = {'aa': 0.0, 'ee': 0.0, 'ih': 0.0, 'oh': 0.0, 'ou': 0.0}
+                else:
+                    normalized_vol = min(1.0, vol / 5000.0)
+                    target = {
+                        'aa': normalized_vol * 0.7,
+                        'ee': normalized_vol * 0.3,
+                        'ih': normalized_vol * 0.2,
+                        'oh': normalized_vol * 0.5,
+                        'ou': normalized_vol * 0.4
+                    }
+                    
+                current_aa += (target['aa'] - current_aa) * smoothing
+                current_ee += (target['ee'] - current_ee) * smoothing
+                current_ih += (target['ih'] - current_ih) * smoothing
+                current_oh += (target['oh'] - current_oh) * smoothing
+                current_ou += (target['ou'] - current_ou) * smoothing
+                
+                # Dispatch real-time visemes over the thread-safe websocket callback register
+                if config.SEND_UI_STATE_CALLBACK:
+                    config.SEND_UI_STATE_CALLBACK(current_aa, current_ee, current_ih, current_oh, current_ou, listening=False)
+                    
+                speaker_stream.write(data)
+                current_frame += chunk_size
+            
+            # Send silent mouth viseme state at end of sentence
+            if config.SEND_UI_STATE_CALLBACK:
+                config.SEND_UI_STATE_CALLBACK(0.0, 0.0, 0.0, 0.0, 0.0, listening=False)
+                
+        except queue.Empty:
+            config.SPEAKER_ACTIVE = False
+            config.SPEECH_IN_PROGRESS = False
+            
+        except Exception as e:
+            print(f"❌ Playback Worker Exception: {e}")
+            time.sleep(0.1)
+            
+    # Cleanup speaker stream explicitly
+    try:
+        speaker_stream.stop_stream()
+        speaker_stream.close()
+    except Exception:
+        pass

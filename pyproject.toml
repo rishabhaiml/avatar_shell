@@ -1,0 +1,22 @@
+[project]
+name = "avatar-shell"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "indic-transliteration>=2.3.82",
+    "kokoro>=0.9.4",
+    "llama-cpp-python>=0.3.23",
+    "numpy<2.0",
+    "onnxruntime>=1.26.0",
+    "openwakeword>=0.4.0",
+    "pyaudio>=0.2.14",
+    "pygobject>=3.56.3",
+    "setuptools<70.0.0",
+    "sounddevice>=0.5.5",
+    "soundfile>=0.13.1",
+    "webrtcvad>=2.0.10",
+    "websockets>=16.0",
+]

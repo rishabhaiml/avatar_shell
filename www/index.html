@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Avatar Renderer</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: transparent;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #status {
+            position: fixed;
+            left: 8px;
+            top: 8px;
+            color: white;
+            background: rgba(0, 0, 0, 0.65);
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-family: sans-serif;
+            font-size: 12px;
+            z-index: 9999;
+        }
+    </style>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./js/three.module.js",
+          "three/addons/loaders/GLTFLoader.js": "./js/GLTFLoader.js",
+          "three/addons/utils/BufferGeometryUtils.js": "./utils/BufferGeometryUtils.js",
+          "@pixiv/three-vrm": "./js/three-vrm.module.js"
+        }
+      }
+    </script>
+</head>
+
+<body>
+    <div id="status">Loading avatar...</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { VRMLoaderPlugin } from '@pixiv/three-vrm';
+
+        const statusEl = document.getElementById("status");
+
+        function setStatus(text) {
+            console.log(text);
+            if (statusEl) statusEl.textContent = text;
+        }
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
+        camera.position.set(0, 1.5, 0.6);
+
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x000000, 0);
+        document.body.appendChild(renderer.domElement);
+
+        const light = new THREE.DirectionalLight(0xffffff, 2.0);
+        light.position.set(1, 1, 1).normalize();
+        scene.add(light);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+
+        const loader = new GLTFLoader();
+        loader.register((parser) => new VRMLoaderPlugin(parser));
+
+        let currentVrm = null;
+
+        loader.load(
+            './model.vrm',
+            (gltf) => {
+                const vrm = gltf.userData.vrm;
+
+                if (!vrm) {
+                    setStatus("VRM plugin loaded, but no VRM data found.");
+                    return;
+                }
+
+                scene.add(vrm.scene);
+                currentVrm = vrm;
+                vrm.scene.rotation.y = Math.PI;
+
+                const leftArm = vrm.humanoid.getNormalizedBoneNode('leftUpperArm');
+                const rightArm = vrm.humanoid.getNormalizedBoneNode('rightUpperArm');
+
+                if (leftArm && rightArm) {
+                    leftArm.rotation.z = 1.2;
+                    rightArm.rotation.z = -1.2;
+                }
+
+                setStatus("Avatar loaded.");
+                setTimeout(() => {
+                    if (statusEl) statusEl.style.display = "none";
+                }, 1500);
+            },
+            (progress) => {
+                if (progress.total) {
+                    const pct = Math.round((progress.loaded / progress.total) * 100);
+                    setStatus(`Loading VRM ${pct}%...`);
+                }
+            },
+            (error) => {
+                console.error(error);
+                setStatus("Failed to load model.vrm. Check path/server console.");
+            }
+        );
+
+        // --- Streamed States ---
+        let mouthAA = 0.0;
+        let mouthEE = 0.0;
+        let mouthIH = 0.0;
+        let mouthOH = 0.0;
+        let mouthOU = 0.0;
+        let isListening = false;
+        let isThinking = false;
+
+        // --- Smooth Animation Tracking Variables ---
+        let targetListenWeight = 0.0;
+        let currentListenWeight = 0.0;
+        let targetThinkWeight = 0.0;
+        let currentThinkWeight = 0.0;
+
+        // --- Auto-Reconnecting WebSocket Bridge ---
+        let ws = null;
+
+        function connectWebSocket() {
+            ws = new WebSocket('ws://127.0.0.1:8765');
+
+            ws.onopen = () => {
+                setStatus("WebSocket connected. Listening for UI states...");
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.action === 'mouth') {
+                    mouthAA = data.aa || 0.0;
+                    mouthEE = data.ee || 0.0;
+                    mouthIH = data.ih || 0.0;
+                    mouthOH = data.oh || 0.0;
+                    mouthOU = data.ou || 0.0;
+                    isListening = data.listening || false;
+                    isThinking = data.thinking || false;
+                }
+            };
+
+            ws.onclose = () => {
+                setStatus("WebSocket closed. Reconnecting...");
+                setTimeout(connectWebSocket, 1000);
+            };
+
+            ws.onerror = () => {
+                try {
+                    ws.close();
+                } catch (e) { }
+            };
+        }
+
+        // Initialize connection
+        connectWebSocket();
+
+        // --- Animation Loop ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const deltaTime = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            // Set target weights
+            targetListenWeight = isListening ? 1.0 : 0.0;
+            targetThinkWeight = isThinking ? 1.0 : 0.0;
+
+            // Smoothly interpolate weights
+            currentListenWeight = THREE.MathUtils.lerp(currentListenWeight, targetListenWeight, 8 * deltaTime);
+            currentThinkWeight = THREE.MathUtils.lerp(currentThinkWeight, targetThinkWeight, 8 * deltaTime);
+
+            if (currentVrm) {
+                // Apply Full 5-Vowel Lip Sync + Anticipatory part of lips when thinking
+                currentVrm.expressionManager.setValue('aa', mouthAA);
+                currentVrm.expressionManager.setValue('ee', mouthEE);
+                currentVrm.expressionManager.setValue('ih', mouthIH + (currentThinkWeight * 0.15));
+                currentVrm.expressionManager.setValue('oh', mouthOH);
+                currentVrm.expressionManager.setValue('ou', mouthOU);
+
+                // --- Autonomous Lifelike Behaviors ---
+
+                // 1. Auto-Blinking (Randomized blinking intervals)
+                const blinkCycle = time % 4.0;
+                let blinkValue = 0.0;
+                if (blinkCycle > 3.8 && !isListening) { // Keep eyes open if listening
+                    blinkValue = Math.sin((blinkCycle - 3.8) * Math.PI * 5.0);
+                    blinkValue = Math.max(0.0, blinkValue); // Clamp to positive
+                }
+                currentVrm.expressionManager.setValue('blink', blinkValue);
+
+                // 2. Attentive Listening (Widen eyes slightly)
+                currentVrm.expressionManager.setValue('surprised', currentListenWeight * 0.4);
+
+                // 3. Dynamic Posture (Head and Neck Tilt & Idle Breathing)
+                const head = currentVrm.humanoid.getNormalizedBoneNode('head');
+                const neck = currentVrm.humanoid.getNormalizedBoneNode('neck');
+
+                if (head && neck) {
+                    // Idle breathing motion (slowly swaying head)
+                    const idleSwayX = Math.sin(time * 0.8) * 0.02;
+                    const idleSwayZ = Math.cos(time * 0.5) * 0.01;
+
+                    // Blend idle motion with attentive listening and thinking posture
+                    head.rotation.x = (currentListenWeight * 0.10) - (currentThinkWeight * 0.08) + idleSwayX;
+                    head.rotation.z = (currentListenWeight * -0.15) + (currentThinkWeight * 0.10) + idleSwayZ;
+                    neck.rotation.z = (currentListenWeight * -0.05) - (currentThinkWeight * 0.03);
+                }
+
+                currentVrm.expressionManager.update();
+                currentVrm.update(deltaTime);
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+
+</html>
