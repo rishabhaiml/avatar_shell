@@ -8,7 +8,7 @@ import subprocess
 import urllib.parse
 from llama_cpp import Llama
 import config
-from brain.normalizer import StreamSentenceSplitter, LinguisticNormalizer
+from brain.normalizer import StreamClauseSplitter, LinguisticNormalizer
 from memory.engine import BHAIMemoryEngine  # Hook the new memory core
 
 # --- SYSTEM INTEGRATION DRIVER CORE ---
@@ -190,7 +190,7 @@ def llm_worker_thread(model_path: str):
                 config.LLM_ACTIVE = False
                 continue
 
-            splitter = StreamSentenceSplitter()
+            splitter = StreamClauseSplitter()
             filter_handler = TokenTextFilter()
             
             # Dynamic Context Budgeting Guardrail (Safe tracking for 1024 max token models)

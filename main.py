@@ -12,15 +12,6 @@ import collections
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 import numpy as np
 import websockets
-try:
-    import pyaudio
-except ImportError:
-    pyaudio = None
-
-try:
-    import webrtcvad
-except ImportError:
-    webrtcvad = None
 
 import openwakeword
 from openwakeword.model import Model
@@ -78,10 +69,8 @@ from brain.tts import kokoro_synthesizer_worker
 from brain.normalizer import LinguisticNormalizer
 
 # Global Engines and Streams
-COMMAND_VAD = webrtcvad.Vad(3) if webrtcvad else None
 STT_MODEL = None
 WAKE_MODEL = None
-MIC_STREAM = None
 
 # --- LOCAL STATIC EMBEDDED UI WEBSERVER ---
 def start_static_ui_server():
@@ -147,14 +136,6 @@ def send_ui_state(aa=0.0, ee=0.0, ih=0.0, oh=0.0, ou=0.0, listening=False, think
 # Bind the websocket sender callback to config
 config.SEND_UI_STATE_CALLBACK = send_ui_state
 
-# --- MIC CAPTURE INPUT CALLBACK ---
-def mic_stream_callback(in_data, frame_count, time_info, status):
-    """Asynchronously pipes sound card raw frames straight into config queue."""
-    try:
-        config.AUDIO_FRAME_QUEUE.put(in_data)
-    except Exception:
-        pass
-    return (None, pyaudio.paContinue)
 
 def strip_wake_phrase(text: str) -> str:
     lowered = text.strip()
@@ -196,25 +177,30 @@ def stt_worker_thread():
             print("\n🎤 Whisper STT: Transcribing voice buffer...")
             t0 = time.time()
             audio_np = np.frombuffer(audio_payload, dtype=np.int16).astype(np.float32) / 32768.0
-            
-            segments, _ = STT_MODEL.transcribe(
-                audio_np, language="en", task="transcribe", beam_size=5,
-                vad_filter=True, condition_on_previous_text=False, temperature=0.0
-            )
-            segment_list = list(segments)
+
+            with config.STT_LOCK:  # Serialize against cadence sniffer thread
+                segments, _ = STT_MODEL.transcribe(
+                    audio_np, language="en", task="transcribe", beam_size=5,
+                    vad_filter=True, condition_on_previous_text=False, temperature=0.0
+                )
+                segment_list = list(segments)
+
             elapsed = time.time() - t0
-            print(f"⏱️ STT Transcription took {elapsed:.2f}s")
-            
+            print(f"\u23f1\ufe0f STT Transcription took {elapsed:.2f}s")
+
             user_text = strip_wake_phrase(" ".join(seg.text for seg in segment_list).strip())
-            
+
             if len(user_text) < 2:
-                print("⚠️ Transcript too short. Aborting intent cycle.")
-                # Safe state transition back to IDLE
+                print("\u26a0\ufe0f Transcript too short. Aborting intent cycle.")
+                # Safe state transition back to IDLE (GTK-aware)
                 def set_idle_state():
                     config.CURRENT_STATE = config.AppState.IDLE
                     if config.SEND_UI_STATE_CALLBACK:
                         config.SEND_UI_STATE_CALLBACK(listening=False, thinking=False)
-                GLib.idle_add(set_idle_state)
+                if HAS_GUI and GLib is not None:
+                    GLib.idle_add(set_idle_state)
+                else:
+                    set_idle_state()
                 continue
             
             print(f"👤 User said: {user_text!r}")
@@ -224,16 +210,9 @@ def stt_worker_thread():
             print(f"❌ STT Worker Thread Error: {e}")
             time.sleep(0.1)
 
-# --- RECURRENT WAKE WORD / MIC DRAINING CLEANUP ---
+# --- WAKE WORD ONNX FLUSH ---
 def flush_hardware_and_onnx():
-    global MIC_STREAM, WAKE_MODEL
-    if MIC_STREAM:
-        try:
-            available = MIC_STREAM.get_read_available()
-            if available > 0:
-                MIC_STREAM.read(available, exception_on_overflow=False)
-        except Exception:
-            pass
+    """Flushes ONNX state registers by feeding zero frames through the wake model."""
     if WAKE_MODEL:
         try:
             zero_frame = np.zeros(1280, dtype=np.int16)
@@ -274,12 +253,15 @@ def trigger_barge_in_interrupt():
     config.consecutive_quiet = 0
     config.total_listening_frames = 0
     
-    # Safe GTK transition to listening
+    # Safe state transition to listening (GTK-aware)
     def set_listening():
         config.CURRENT_STATE = config.AppState.LISTENING
         if config.SEND_UI_STATE_CALLBACK:
             config.SEND_UI_STATE_CALLBACK(listening=True)
-    GLib.idle_add(set_listening)
+    if HAS_GUI and GLib is not None:
+        GLib.idle_add(set_listening)
+    else:
+        set_listening()
     
     print("🎧 Listening for your command...")
     config.listening_start_time = time.time()
@@ -408,13 +390,18 @@ def process_audio_queue() -> bool:
 
             # Proactive State Routing: Transition to ROOM_COOLDOWN_FOLLOW_UP or IDLE when speaking/thinking ends
             if config.CURRENT_STATE == config.AppState.THINKING and not config.SPEECH_IN_PROGRESS and not config.LLM_TURN_ACTIVE:
+                # HARDENED ESCAPE GATE: Verify that no clauses are pending inside the communication channels
+                if not config.SENTENCE_QUEUE.empty() or config.TTS_PROCESSING or config.SPEAKER_ACTIVE:
+                    time.sleep(0.01) # Yield slice back to scheduler and wait for active queue drain
+                    continue
+
                 if config.WAITING_FOR_CLARIFICATION:
                     print("\n📣 CLARIFICATION LOOP ACTIVE: Starting playout tail isolation cooldown...")
                     config.WAITING_FOR_CLARIFICATION = False # Consume flag
                     config.cooldown_end_time = time.time() + 0.30
                     config.CURRENT_STATE = config.AppState.ROOM_COOLDOWN_FOLLOW_UP
                 else:
-                    print("⏱️ Turn completed. Returning to IDLE state.")
+                    print("⏱️ Turn completed. Returning to IDLE state safely.")
                     config.CURRENT_STATE = config.AppState.IDLE
                     if config.SEND_UI_STATE_CALLBACK:
                         config.SEND_UI_STATE_CALLBACK(listening=False, thinking=False)
@@ -487,17 +474,13 @@ def process_audio_queue() -> bool:
                 config.command_audio_buffer.extend(clean_chunk)
                 config.total_listening_frames += 1
 
-                # Sub-chunk slicing for WebRTC VAD inputs using clean centered samples
+                # Pure-Python RMS VAD — process in 480-sample (30ms) sub-chunks
                 config.VAD_ACCUMULATOR = np.concatenate((config.VAD_ACCUMULATOR, clean_np))
                 while len(config.VAD_ACCUMULATOR) >= 480:
-                    sub_chunk = config.VAD_ACCUMULATOR[:480]
+                    sub_chunk_np = config.VAD_ACCUMULATOR[:480]
                     config.VAD_ACCUMULATOR = config.VAD_ACCUMULATOR[480:]
 
-                    sub_chunk_arr = np.frombuffer(sub_chunk, dtype=np.int16) if isinstance(sub_chunk, bytes) else sub_chunk
-                    sub_bytes = sub_chunk.tobytes()
-                    
-                    # We run the VAD but ignore standard VAD return triggers for follow-up listening
-                    should_trigger = run_adaptive_snr_vad(sub_bytes, COMMAND_VAD)
+                    should_trigger = run_adaptive_snr_vad(sub_chunk_np)
                     if config.CURRENT_STATE == config.AppState.LISTENING and should_trigger:
                         break
                 
@@ -513,15 +496,16 @@ def process_audio_queue() -> bool:
                                 try:
                                     if STT_MODEL:
                                         audio_np = np.frombuffer(audio_snapshot, dtype=np.int16).astype(np.float32) / 32768.0
-                                        segments, _ = STT_MODEL.transcribe(audio_np, language="en", beam_size=1)
-                                        partial_text = " ".join(seg.text for seg in segments).strip().lower()
-                                        
+                                        with config.STT_LOCK:  # Serialize against primary STT worker
+                                            segments, _ = STT_MODEL.transcribe(audio_np, language="en", beam_size=1)
+                                            partial_text = " ".join(seg.text for seg in segments).strip().lower()
+
                                         CONJUNCTIONS = ["because", "but", "so", "and", "or", "if", "then", "like"]
                                         words = partial_text.split()
                                         if words and words[-1] in CONJUNCTIONS:
                                             config.DYNAMIC_SILENCE_LIMIT = 40  # Scale limit to 1200ms
-                                            print(f"🔍 [CADENCE-BACKOFF] Trailing conjunction detected ({words[-1]!r}). Scaling silence floor to 1200ms.")
-                                except Exception as e:
+                                            print(f"\U0001f50d [CADENCE-BACKOFF] Trailing conjunction detected ({words[-1]!r}). Scaling silence floor to 1200ms.")
+                                except Exception:
                                     pass
                                 finally:
                                     config.CADENCE_CHECK_IN_PROGRESS = False
@@ -650,14 +634,11 @@ def main():
     threading.Thread(target=llm_worker_thread, args=(os.path.join(base_dir, "model.gguf"),), daemon=True).start()
     threading.Thread(target=kokoro_synthesizer_worker, daemon=True).start()
     
-    # Initialize physical Sound Card PortAudio drivers conditionally
-    pa = pyaudio.PyAudio() if pyaudio else None
-    
-    # Open mic record streaming pipeline
-    threading.Thread(target=audio_hardware_capture_loop, args=(pa,), daemon=True).start()
-    
-    # Open speaker playback pipeline (attaching wake model reset as flush_callback)
-    threading.Thread(target=playback_worker_thread, args=(pa, flush_hardware_and_onnx), daemon=True).start()
+    # Open mic record streaming pipeline (sounddevice, no pa arg)
+    threading.Thread(target=audio_hardware_capture_loop, daemon=True).start()
+
+    # Open speaker playback pipeline
+    threading.Thread(target=playback_worker_thread, args=(flush_hardware_and_onnx,), daemon=True).start()
 
     print("\n🎤 B.H.A.I. Core Active. Say 'Hey Jarvis'...")
 
@@ -675,11 +656,6 @@ def main():
         except KeyboardInterrupt:
             print("\n⚙️ Shutting down Shell cleanly via termination sequences.")
         finally:
-            if pa:
-                try:
-                    pa.terminate()
-                except Exception:
-                    pass
             sys.exit(0)
     else:
         # Hook the state machine timer loop into the primary GTK thread context
@@ -692,11 +668,6 @@ def main():
         except KeyboardInterrupt:
             print("\n⚙️ Shutting down Shell cleanly via termination sequences.")
         finally:
-            if pa:
-                try:
-                    pa.terminate()
-                except Exception:
-                    pass
             sys.exit(0)
 
 if __name__ == "__main__":

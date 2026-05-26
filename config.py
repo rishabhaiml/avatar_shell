@@ -13,6 +13,7 @@ if sys.platform.startswith("win") or os.environ.get("FORCE_BROWSER_MODE") == "1"
 
 # --- HARDWARE & AUDIO CONSTANTS ---
 RATE = 16000
+SAMPLE_RATE = RATE    # OpenSpec spec-driven alias — both names resolve identically
 CHUNK = 1280          # 80ms hardware frames
 VAD_FRAME_MS = 30
 VAD_SAMPLES = 480     # 30ms evaluation chunks
@@ -37,6 +38,7 @@ SPEECH_PLAYBACK_QUEUE = queue.Queue()
 
 # --- THREAD SYNCHRONIZATION OBJECTS ---
 INTERRUPT_FLAG = threading.Event()
+STT_LOCK = threading.Lock()   # Serializes concurrent WhisperModel.transcribe() calls
 CONNECTED_CLIENTS = set()
 ASYNC_LOOP = None
 
